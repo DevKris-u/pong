@@ -1,7 +1,7 @@
 {
   "name": "pong-multiplayer",
   "version": "1.0.0",
-  "description": "Multiplayer Pong game",
+  "description": "Stable Multiplayer Pong",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -9,8 +9,9 @@
   "dependencies": {
     "express": "^4.17.1",
     "ws": "^8.8.1",
-    "sanitize-html": "^2.7.0",
-    "lowdb": "^3.0.0"
+    "sanitize-html": "^2.7.1",
+    "lowdb": "^3.0.0",
+    "uuid": "^9.0.0"
   },
   "engines": {
     "node": ">=14.x"
