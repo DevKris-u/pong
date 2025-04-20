@@ -1,3 +1,5 @@
+// [CAŁY ZMIENIONY KOD Z POPRAWKAMI]
+
 const WebSocket = require('ws');
 const express = require('express');
 const sanitizeHtml = require('sanitize-html');
@@ -73,7 +75,6 @@ function syncRoomState(room) {
     });
 }
 
-// Keep-alive
 setInterval(() => {
     wss.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
@@ -118,7 +119,10 @@ wss.on('connection', (ws) => {
                     sessions[sessionId] = { room: roomName, clientId };
                     console.log(`Nowy gracz ${nickname} dołączył jako ${clientId}`);
                 }
-                resetBall(roomName);
+
+                if (Object.keys(rooms[roomName].players).length === 2 && Object.values(rooms[roomName].players).every(p => !p.disconnected)) {
+                    resetBall(roomName);
+                }
             } else {
                 clientId = `s_${Object.keys(rooms[roomName].spectators).length}`;
                 rooms[roomName].spectators[clientId] = { nickname };
@@ -139,7 +143,7 @@ wss.on('connection', (ws) => {
                 isSpectator,
                 startTime: rooms[roomName].startTime
             }));
-            syncRoomState(roomName); // Synchronizuj stan dla wszystkich
+            syncRoomState(roomName);
             broadcastRooms();
         } else if (data.type === 'move' && clientId && !isSpectator && rooms[roomName]) {
             rooms[roomName].pendingUpdates[clientId] = Math.max(0, Math.min(400 - 60, data.y));
@@ -188,12 +192,11 @@ setInterval(() => {
     const now = Date.now();
     Object.keys(rooms).forEach(room => {
         Object.keys(rooms[room].activity).forEach(id => {
-            if (now - rooms[room].activity[id] > 30000) {
+            if (now - rooms[room].activity[id] > 300000) {
                 if (rooms[room].players[id]) {
-                    delete rooms[room].players[id];
+                    rooms[room].players[id].disconnected = true;
                     delete rooms[room].pendingUpdates[id];
-                    resetBall(room);
-                    rooms[room].scores = [0, 0];
+                    console.log(`Usunięto gracza ${id} z pokoju ${room} po 5 minutach braku aktywności`);
                 } else if (rooms[room].spectators[id]) {
                     delete rooms[room].spectators[id];
                 }
@@ -226,14 +229,12 @@ setInterval(() => {
         if (ball.y + ball.r > 400 || ball.y - ball.r < 0) ball.dy = -ball.dy;
 
         const now = Date.now();
-        let hit = false;
         if (now - lastHitTime > 100) {
             Object.values(players).forEach(p => {
                 if (!p.disconnected && ball.x - ball.r < p.x + 10 && ball.x + ball.r > p.x && ball.y > p.y && ball.y < p.y + 60) {
                     ball.dx = -ball.dx * 1.05;
                     ball.dx = Math.max(-MAX_BALL_SPEED, Math.min(MAX_BALL_SPEED, ball.dx));
                     ball.dy = Math.max(-MAX_BALL_SPEED, Math.min(MAX_BALL_SPEED, ball.dy));
-                    hit = true;
                     rooms[room].lastHitTime = now;
                 }
             });
