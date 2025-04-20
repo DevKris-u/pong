@@ -14,84 +14,60 @@ try {
 }
 
 const app = express();
-
-// Serwowanie plików statycznych
 app.use(express.static(__dirname));
 
-// Serwowanie index.html
 app.get('/', (req, res) => {
-    const filePath = path.join(__dirname, 'index.html');
-    if (fs.existsSync(filePath)) {
-        res.sendFile(filePath);
-    } else {
-        res.status(404).send('Plik index.html nie znaleziony');
-    }
+    res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// Reset liderów (tylko dla testów)
 app.get('/reset-leaderboard', (req, res) => {
     if (db) {
         db.data.scores = [];
-        db.write().then(() => res.send('Tabela liderów zresetowana')).catch(err => res.status(500).send('Błąd resetowania'));
+        db.write().then(() => res.send('Tabela liderów zresetowana')).catch(() => res.status(500).send('Błąd'));
     } else {
         fallbackScores.scores = [];
-        res.send('Tabela liderów zresetowana (pamięć tymczasowa)');
+        res.send('Tabela liderów zresetowana');
     }
 });
 
-// Inicjalizacja bazy danych
 let fallbackScores = { scores: [] };
 if (Low) {
     const filePath = path.join(__dirname, 'scores.json');
-    if (!fs.existsSync(filePath)) {
-        fs.writeFileSync(filePath, JSON.stringify({ scores: [] }));
-    }
+    if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, JSON.stringify({ scores: [] }));
     const adapter = new JSONFile(filePath);
     db = new Low(adapter, { scores: [] });
-    db.read().catch(err => {
-        console.error('Błąd inicjalizacji bazy danych:', err);
-        db.data = { scores: [] };
-    });
+    db.read().catch(() => db.data = { scores: [] });
 } else {
-    console.warn('Lowdb niedostępne, używam pamięci tymczasowej');
     db = { data: fallbackScores, write: () => Promise.resolve() };
 }
 
-// Serwer WebSocket
-const server = app.listen(process.env.PORT || 3000, () => {
-    console.log('Serwer działa na porcie', process.env.PORT || 3000);
-});
+const server = app.listen(process.env.PORT || 3000);
 const wss = new WebSocket.Server({ server });
-
 const rooms = {};
-const UPDATE_INTERVAL = 1000 / 30; // Aktualizacja gry co 33ms (30 FPS)
+const UPDATE_INTERVAL = 1000 / 25;
 
 function createRoom(room) {
     if (!rooms[room]) {
         rooms[room] = {
             players: {},
             spectators: {},
-            ball: { x: 400, y: 200, dx: 5, dy: 5, radius: 10 },
+            ball: { x: 400, y: 200, dx: 5, dy: 5, r: 10 },
             scores: [0, 0],
             activity: {},
             startTime: Date.now(),
-            pendingUpdates: {} // Bufor zmian pozycji graczy
+            pendingUpdates: {}
         };
     }
 }
 
 wss.on('connection', (ws) => {
-    let clientId;
-    let roomName;
-    let nickname;
-    let isSpectator = false;
+    let clientId, roomName, nickname, isSpectator = false;
 
     ws.on('message', (message) => {
         let data;
         try {
             data = JSON.parse(message);
-        } catch (e) {
-            console.error('Błąd parsowania wiadomości:', e);
+        } catch {
             return;
         }
 
@@ -104,12 +80,12 @@ wss.on('connection', (ws) => {
             if (!isSpectator) {
                 const playerCount = Object.keys(rooms[roomName].players).length;
                 if (playerCount >= 2) {
-                    ws.send(JSON.stringify({ type: 'error', message: 'Pokój pełny dla graczy! Dołącz jako widz.' }));
+                    ws.send(JSON.stringify({ type: 'error', message: 'Pokój pełny!' }));
                     ws.close();
                     return;
                 }
                 clientId = playerCount.toString();
-                rooms[roomName].players[clientId] = { x: clientId === '0' ? 10 : 780, y: 170, id: clientId, nickname };
+                rooms[roomName].players[clientId] = { x: clientId === '0' ? 10 : 780, y: 170, id: clientId };
             } else {
                 clientId = `s_${Object.keys(rooms[roomName].spectators).length}`;
                 rooms[roomName].spectators[clientId] = { nickname };
@@ -120,63 +96,51 @@ wss.on('connection', (ws) => {
             ws.roomName = roomName;
             rooms[roomName].activity[clientId] = Date.now();
             ws.send(JSON.stringify({ type: 'init', id: clientId, players: rooms[roomName].players, isSpectator, startTime: rooms[roomName].startTime }));
-            broadcast(roomName, { type: 'update', players: rooms[roomName].players, ball: rooms[roomName].ball });
+            broadcast(roomName, { type: 'update', p: rooms[roomName].players, b: rooms[roomName].ball });
             broadcastRooms();
         } else if (data.type === 'move' && clientId && !isSpectator && rooms[roomName]) {
             rooms[roomName].pendingUpdates[clientId] = Math.max(0, Math.min(400 - 60, data.y));
             rooms[roomName].activity[clientId] = Date.now();
         } else if (data.type === 'chat' && clientId && rooms[roomName]) {
-            const cleanMessage = sanitizeHtml(data.message).slice(0, 100);
-            if (cleanMessage) {
-                broadcast(roomName, { type: 'chat', nickname, message: cleanMessage });
-            }
+            const msg = sanitizeHtml(data.message).slice(0, 100);
+            if (msg) broadcast(roomName, { type: 'chat', n: nickname, m: msg });
             rooms[roomName].activity[clientId] = Date.now();
         } else if (data.type === 'spectatorChat' && clientId && isSpectator && rooms[roomName]) {
-            const cleanMessage = sanitizeHtml(data.message).slice(0, 100);
-            if (cleanMessage) {
-                broadcastSpectators(roomName, { type: 'spectatorChat', nickname, message: cleanMessage });
-            }
+            const msg = sanitizeHtml(data.message).slice(0, 100);
+            if (msg) broadcastSpectators(roomName, { type: 'spectatorChat', n: nickname, m: msg });
             rooms[roomName].activity[clientId] = Date.now();
         } else if (data.type === 'getRooms') {
             broadcastRooms();
         }
     });
 
-    ws.on('close', () => {
-        handleDisconnect(ws);
-    });
-
-    ws.on('error', (err) => {
-        console.error(`Błąd WebSocket dla klienta ${clientId}:`, err);
-        handleDisconnect(ws);
-    });
+    ws.on('close', () => handleDisconnect(ws));
+    ws.on('error', () => handleDisconnect(ws));
 });
 
 function handleDisconnect(ws) {
     const { clientId, roomName, isSpectator } = ws;
     if (clientId && roomName && rooms[roomName]) {
-        if (isSpectator) {
-            delete rooms[roomName].spectators[clientId];
-        } else {
+        if (isSpectator) delete rooms[roomName].spectators[clientId];
+        else {
             delete rooms[roomName].players[clientId];
             delete rooms[roomName].pendingUpdates[clientId];
         }
         delete rooms[roomName].activity[clientId];
         resetBall(roomName);
-        broadcast(roomName, { type: 'update', players: rooms[roomName].players, ball: rooms[roomName].ball });
-        if (Object.keys(rooms[roomName].players).length === 0 && Object.keys(rooms[roomName].spectators).length === 0) {
+        broadcast(roomName, { type: 'update', p: rooms[roomName].players, b: rooms[roomName].ball });
+        if (!Object.keys(rooms[roomName].players).length && !Object.keys(rooms[roomName].spectators).length) {
             delete rooms[roomName];
         }
         broadcastRooms();
     }
 }
 
-// Sprawdzanie nieaktywnych klientów
 setInterval(() => {
     const now = Date.now();
     Object.keys(rooms).forEach(room => {
         Object.keys(rooms[room].activity).forEach(id => {
-            if (now - rooms[room].activity[id] > 15000) { // Skrócono do 15s
+            if (now - rooms[room].activity[id] > 10000) {
                 if (rooms[room].players[id]) {
                     delete rooms[room].players[id];
                     delete rooms[room].pendingUpdates[id];
@@ -185,44 +149,30 @@ setInterval(() => {
                 }
                 delete rooms[room].activity[id];
                 resetBall(room);
-                broadcast(room, { type: 'update', players: rooms[room].players, ball: rooms[room].ball });
+                broadcast(room, { type: 'update', p: rooms[room].players, b: rooms[room].ball });
             }
         });
-        if (Object.keys(rooms[room].players).length === 0 && Object.keys(rooms[room].spectators).length === 0) {
+        if (!Object.keys(rooms[room].players).length && !Object.keys(rooms[room].spectators).length) {
             delete rooms[room];
         }
     });
     broadcastRooms();
 }, 1000);
 
-// Logika gry
 setInterval(() => {
     Object.keys(rooms).forEach(room => {
         const { ball, players, scores, pendingUpdates } = rooms[room];
-
-        // Aktualizacja pozycji graczy z bufora
-        Object.keys(pendingUpdates).forEach(id => {
-            players[id].y = pendingUpdates[id];
-        });
+        Object.keys(pendingUpdates).forEach(id => players[id].y = pendingUpdates[id]);
         rooms[room].pendingUpdates = {};
 
-        // Aktualizacja piłki
         ball.x += ball.dx;
         ball.y += ball.dy;
-
-        if (ball.y + ball.radius > 400 || ball.y - ball.radius < 0) {
-            ball.dy = -ball.dy;
-        }
+        if (ball.y + ball.r > 400 || ball.y - ball.r < 0) ball.dy = -ball.dy;
 
         let hit = false;
-        Object.values(players).forEach(player => {
-            if (
-                ball.x - ball.radius < player.x + 10 &&
-                ball.x + ball.radius > player.x &&
-                ball.y > player.y &&
-                ball.y < player.y + 60
-            ) {
-                ball.dx = -ball.dx * 1.05; // Lekkie przyspieszenie po odbiciu
+        Object.values(players).forEach(p => {
+            if (ball.x - ball.r < p.x + 10 && ball.x + ball.r > p.x && ball.y > p.y && ball.y < p.y + 60) {
+                ball.dx = -ball.dx * 1.05;
                 hit = true;
             }
         });
@@ -239,47 +189,36 @@ setInterval(() => {
             broadcastScore(room);
         }
 
-        // Wysyłanie skompresowanego stanu gry
-        broadcast(room, {
-            type: 'update',
-            players: Object.fromEntries(Object.entries(players).map(([id, p]) => [id, { x: p.x, y: p.y, id: p.id }])),
-            ball: { x: ball.x, y: ball.y, dx: ball.dx, dy: ball.dy, radius: ball.radius },
-            hit
-        });
+        broadcast(room, { type: 'update', p: players, b: ball, h: hit });
     });
 }, UPDATE_INTERVAL);
 
 function resetBall(room) {
     if (rooms[room]) {
-        rooms[room].ball.x = 400;
-        rooms[room].ball.y = 200;
-        rooms[room].ball.dx = 5 * (Math.random() > 0.5 ? 1 : -1);
-        rooms[room].ball.dy = 5 * (Math.random() > 0.5 ? 1 : -1);
+        const { ball } = rooms[room];
+        ball.x = 400;
+        ball.y = 200;
+        ball.dx = 5 * (Math.random() > 0.5 ? 1 : -1);
+        ball.dy = 5 * (Math.random() > 0.5 ? 1 : -1);
     }
 }
 
-function broadcast(room, message) {
+function broadcast(room, msg) {
     if (!rooms[room]) return;
+    const data = JSON.stringify(msg);
     wss.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN && (rooms[room].players[client.clientId] || rooms[room].spectators[client.clientId])) {
-            try {
-                client.send(JSON.stringify(message));
-            } catch (e) {
-                console.error(`Błąd wysyłania do klienta ${client.clientId}:`, e);
-            }
+            client.send(data);
         }
     });
 }
 
-function broadcastSpectators(room, message) {
+function broadcastSpectators(room, msg) {
     if (!rooms[room]) return;
+    const data = JSON.stringify(msg);
     wss.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN && rooms[room].spectators[client.clientId]) {
-            try {
-                client.send(JSON.stringify(message));
-            } catch (e) {
-                console.error(`Błąd wysyłania do widza ${client.clientId}:`, e);
-            }
+            client.send(data);
         }
     });
 }
@@ -290,20 +229,15 @@ function broadcastRooms() {
         players: Object.keys(rooms[room].players).length,
         spectators: Object.keys(rooms[room].spectators).length
     }));
+    const data = JSON.stringify({ type: 'rooms', rooms: roomData });
     wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-            try {
-                client.send(JSON.stringify({ type: 'rooms', rooms: roomData }));
-            } catch (e) {
-                console.error(`Błąd wysyłania listy pokoi do klienta ${client.clientId}:`, e);
-            }
-        }
+        if (client.readyState === WebSocket.OPEN) client.send(data);
     });
 }
 
 function broadcastScore(room) {
     if (!rooms[room]) return;
-    broadcast(room, { type: 'score', scores: rooms[room].scores, leaderboard: db.data.scores });
+    broadcast(room, { type: 'score', s: rooms[room].scores, l: db.data.scores });
 }
 
 function updateLeaderboard(room, winnerId) {
@@ -311,13 +245,9 @@ function updateLeaderboard(room, winnerId) {
     const winner = rooms[room].players[winnerId];
     if (winner) {
         const existing = db.data.scores.find(s => s.nickname === winner.nickname);
-        if (existing) {
-            existing.score++;
-        } else {
-            db.data.scores.push({ nickname: winner.nickname, score: 1 });
-        }
-        db.data.scores.sort((a, b) => b.score - a.score);
-        db.data.scores = db.data.scores.slice(0, 10);
-        db.write().catch(err => console.error('Błąd zapisu bazy danych:', err));
+        if (existing) existing.score++;
+        else db.data.scores.push({ nickname: winner.nickname, score: 1 });
+        db.data.scores.sort((a, b) => b.score - a.score).splice(10);
+        db.write().catch(() => {});
     }
 }
