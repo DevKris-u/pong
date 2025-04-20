@@ -159,12 +159,16 @@
                     players = d.players;
                     isSpectator = d.isSpectator;
                     gameStartTime = d.startTime || Date.now();
+                    score1.textContent = 0;
+                    score2.textContent = 0;
                     updateStatus();
                     touchControls.style.display = isSpectator ? 'none' : (window.innerWidth < 768 ? 'flex' : 'none');
                     spectatorControls.style.display = isSpectator ? 'block' : 'none';
                 } else if (d.type === 'update') {
                     players = d.p;
                     ball = d.b;
+                    score1.textContent = d.s[0];
+                    score2.textContent = d.s[1];
                     ballTrail.push({ x: ball.x, y: ball.y });
                     if (ballTrail.length > 8) ballTrail.shift();
                 } else if (d.type === 'score') {
@@ -209,7 +213,7 @@
                 status.textContent = 'Rozłączono...';
                 if (reconnectAttempts < 3) {
                     reconnectAttempts++;
-                    setTimeout(connectWebSocket, 2000);
+                    setTimeout(connectWebSocket, 2000 * Math.pow(1.5, reconnectAttempts)); // Wykładniczy backoff
                 } else {
                     status.textContent = 'Błąd połączenia. Odśwież stronę.';
                 }
@@ -276,13 +280,14 @@
                 const c = Object.keys(players).length, e = Math.floor((Date.now() - gameStartTime) / 1000);
                 status.textContent = `Widz | Pokój: ${room} | Graczy: ${c}/2 | Czas: ${e}s`;
             } else {
-                status.textContent = Object.keys(players).length < 2 ? 'Oczekiwanie...' : 'Gra rozpoczęta!';
+                status.textContent = Object.keys(players).length < 2 ? 'Oczekiwanie na drugiego gracza...' : 'Gra rozpoczęta!';
             }
         }
 
         function draw() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             const s = canvas.width / 800;
+            if (Object.keys(players).length < 2 && !isSpectator) return; // Nie rysuj piłki, jeśli brak graczy
             ballTrail.forEach((p, i) => {
                 ctx.beginPath();
                 ctx.arc(p.x * s, p.y * canvas.height / 400, ball.r * (1 - i / 8) * s, 0, Math.PI * 2);
