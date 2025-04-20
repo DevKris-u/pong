@@ -48,7 +48,7 @@
             background: rgba(255, 255, 255, 0.1);
             transition: background 0.2s;
         }
-        .touch-region.active {
+        .touch-zone.active {
             background: rgba(255, 255, 255, 0.3);
         }
         .chat {
@@ -83,9 +83,11 @@
         }
         .status {
             font-size: 16px;
-            color: yellow;
             margin: 5px;
         }
+        .status.connected { color: green; }
+        .status.disconnected { color: red; }
+        .status.reconnecting { color: orange; }
         .join {
             margin: 10px;
         }
@@ -197,13 +199,60 @@
         window.addEventListener('resize', resizeCanvas);
         resizeCanvas();
 
-        // Połączenie WebSocket
-        const ws = new WebSocket(window.location.protocol === 'https:' ? 'wss://' + window.location.host : 'ws://' + window.location.host);
+        // Połączenie WebSocket z ponownym łączeniem
+        let ws;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+        const reconnectInterval = 3000;
+
+        function connectWebSocket() {
+            ws = new WebSocket(window.location.protocol === 'https:' ? 'wss://' + window.location.host : 'ws://' + window.location.host);
+            status.classList.remove('connected', 'disconnected', 'reconnecting');
+            status.classList.add('reconnecting');
+            status.textContent = 'Łączenie z serwerem...';
+
+            ws.onopen = () => {
+                console.log('Połączono z serwerem');
+                status.classList.remove('reconnecting', 'disconnected');
+                status.classList.add('connected');
+                status.textContent = 'Połączono!';
+                reconnectAttempts = 0;
+                ws.send(JSON.stringify({ type: 'getRooms' }));
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleMessage(data);
+                } catch (e) {
+                    console.error('Błąd parsowania wiadomości:', e);
+                }
+            };
+
+            ws.onclose = () => {
+                status.classList.remove('connected', 'reconnecting');
+                status.classList.add('disconnected');
+                status.textContent = 'Rozłączono. Próba ponownego połączenia...';
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++;
+                    setTimeout(connectWebSocket, reconnectInterval * reconnectAttempts);
+                } else {
+                    status.textContent = 'Nie można połączyć z serwerem. Odśwież stronę.';
+                }
+            };
+
+            ws.onerror = (err) => {
+                console.error('Błąd WebSocket:', err);
+                ws.close();
+            };
+        }
+        connectWebSocket();
+
         let playerId;
         let players = {};
         let ball = { x: 400, y: 200, dx: 5, dy: 5, radius: 10 };
         let ballTrail = [];
-        const paddleWidth = 10, paddleHeight = 60, paddleSpeed = 6;
+        const paddleWidth = 10, paddleHeight = 60, paddleSpeed = 8; // Zwiększono prędkość
         let nickname = '';
         let room = '';
         let isSpectator = false;
@@ -212,7 +261,7 @@
         // Sterowanie
         let moveDirection = 0; // -1 (góra), 0 (stop), 1 (dół)
         let lastUpdateTime = 0;
-        const updateInterval = 100; // Aktualizacja co 100ms
+        const updateInterval = 50; // Aktualizacja co 50ms
 
         // Sterowanie klawiaturą
         let keys = { w: false, s: false, ArrowUp: false, ArrowDown: false };
@@ -309,13 +358,7 @@
             if (e.key === 'Enter') sendChat();
         });
 
-        ws.onopen = () => {
-            console.log('Połączono z serwerem');
-            ws.send(JSON.stringify({ type: 'getRooms' }));
-        };
-
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
+        function handleMessage(data) {
             if (data.type === 'init') {
                 playerId = data.id;
                 players = data.players;
@@ -353,15 +396,17 @@
                 joinSection.style.display = 'block';
                 gameSection.style.display = 'none';
             }
-        };
+        }
 
         function updateStatus() {
             if (isSpectator) {
                 const playerCount = Object.keys(players).length;
                 const elapsed = Math.floor((Date.now() - gameStartTime) / 1000);
                 status.textContent = `Tryb widza | Pokój: ${room} | Graczy: ${playerCount}/2 | Czas gry: ${elapsed}s`;
+            } else if (Object.keys(players).length < 2) {
+                status.textContent = 'Oczekiwanie na drugiego gracza...';
             } else {
-                status.textContent = Object.keys(players).length < 2 ? 'Oczekiwanie na drugiego gracza...' : 'Gra rozpoczęta!';
+                status.textContent = 'Gra rozpoczęta!';
             }
         }
 
@@ -427,16 +472,234 @@
 
         function update() {
             if (isSpectator) {
+ Author's note: It looks like the `update` function in the `index.html` code was cut off. I'll complete it based on the original code provided and incorporate the improvements mentioned.
+
+### Completed and Improved `index.html` (with `update` function)
+Below is the complete `index.html` with the `update` function restored and enhanced to address lag and disconnection issues. The improvements from the previous response are fully integrated.
+
+```html
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pong Multiplayer</title>
+    <style>
+        body {
+            background: #333;
+            text-align: center;
+            color: white;
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            touch-action: none;
+        }
+        h1 {
+            font-size: 24px;
+            margin: 10px 0;
+        }
+        canvas {
+            border: 2px solid white;
+            background: black;
+            max-width: 100%;
+            max-height: 50vh;
+            flex-grow: 1;
+        }
+        p {
+            font-size: 14px;
+            margin: 5px 0;
+        }
+        .touch-controls {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: none;
+            flex-direction: column;
+            pointer-events: auto;
+        }
+        .touch-zone {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.1);
+            transition: background 0.2s;
+        }
+        .touch-zone.active {
+            background: rgba(255, 255, 255, 0.3);
+        }
+        .chat {
+            margin: 10px;
+            flex-shrink: 0;
+        }
+        .chat input {
+            padding: 5px;
+            width:  Wprowadź pseudonim lub wybierz tryb widza!';
+            }
+        }
+        // Zmiana pokoju w trybie widza
+        function switchRoom() {
+            const newRoom = roomSelect.value;
+            if (newRoom && newRoom !== room) {
+                room = newRoom;
+                ws.send(JSON.stringify({ type: 'join', nickname: nickname || 'Widz', room, isSpectator: true }));
+            }
+        }
+        // Lista pokoi
+        function updateRoomList(rooms) {
+            roomList.innerHTML = '';
+            roomSelect.innerHTML = '';
+            if (rooms.length === 0) {
+                roomList.textContent = 'Brak aktywnych pokoi';
+                return;
+            }
+            rooms.forEach(r => {
+                const div = document.createElement('div');
+                div.textContent = `${r.room} (${r.players} graczy, ${r.spectators} widzów)`;
+                div.style.cursor = 'pointer';
+                div.onclick = () => {
+                    roomInput.value = r.room;
+                };
+                roomList.appendChild(div);
+                const option = document.createElement('option');
+                option.value = r.room;
+                option.textContent = `${r.room} (${r.players}/2 graczy)`;
+                roomSelect.appendChild(option);
+            });
+        }
+        // Czat
+        let lastChatTime = 0;
+        function sendChat() {
+            const now = Date.now();
+            if (now - lastChatTime < 2000) return;
+            const message = chatInput.value.trim();
+            if (message) {
+                ws.send(JSON.stringify({ type: isSpectator ? 'spectatorChat' : 'chat', message }));
+                chatInput.value = '';
+                lastChatTime = now;
+            }
+        }
+        chatInput.addEventListener('keypress', e => {
+            if (e.key === 'Enter') sendChat();
+        });
+        function handleMessage(data) {
+            if (data.type === 'init') {
+                playerId = data.id;
+                players = data.players;
+                isSpectator = data.isSpectator;
+                gameStartTime = data.startTime || Date.now();
+                updateStatus();
+                touchControls.style.display = isSpectator ? 'none' : (window.innerWidth < 768 ? 'flex' : 'none');
+                spectatorControls.style.display = isSpectator ? 'block' : 'none';
+            } else if (data.type === 'update') {
+                players = data.players;
+                ball = data.ball;
+                ballTrail.push({ x: ball.x, y: ball.y });
+                if (ballTrail.length > 10) ballTrail.shift();
+            } else if (data.type === 'score') {
+                score1.textContent = data.scores[0];
+                score2.textContent = data.scores[1];
+                updateLeaderboard(data.leaderboard);
+            } else if (data.type === 'chat') {
+                const msg = document.createElement('div');
+                msg.textContent = `${data.nickname}: ${data.message}`;
+                chatBox.appendChild(msg);
+                chatBox.scrollTop = chatBox.scrollHeight;
+            } else if (data.type === 'spectatorChat') {
+                if (isSpectator) {
+                    const msg = document.createElement('div');
+                    msg.textContent = `[Widz] ${data.nickname}: ${data.message}`;
+                    msg.style.color = '#aaa';
+                    chatBox.appendChild(msg);
+                    chatBox.scrollTop = chatBox.scrollHeight;
+                }
+            } else if (data.type === 'rooms') {
+                updateRoomList(data.rooms);
+            } else if (data.type === 'error') {
+                alert(data.message);
+                joinSection.style.display = 'block';
+                gameSection.style.display = 'none';
+            }
+        }
+        function updateStatus() {
+            if (isSpectator) {
+                const playerCount = Object.keys(players).length;
+                const elapsed = Math.floor((Date.now() - gameStartTime) / 1000);
+                status.textContent = `Tryb widza | Pokój: ${room} | Graczy: ${playerCount}/2 | Czas gry: ${elapsed}s`;
+            } else if (Object.keys(players).length < 2) {
+                status.textContent = 'Oczekiwanie na drugiego gracza...';
+            } else {
+                status.textContent = 'Gra rozpoczęta!';
+            }
+        }
+        function updateLeaderboard(leaders) {
+            leaderboard.innerHTML = '';
+            leaders.forEach(leader => {
+                const div = document.createElement('div');
+                div.textContent = `${leader.nickname}: ${leader.score}`;
+                leaderboard.appendChild(div);
+            });
+        }
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            // Ślad piłki
+            ballTrail.forEach((pos, i) => {
+                ctx.beginPath();
+                ctx.arc(
+                    pos.x * canvas.width / 800,
+                    pos.y * canvas.height / 400,
+                    ball.radius * (1 - i / 10) * canvas.width / 800,
+                    0,
+                    Math.PI * 2
+                );
+                ctx.fillStyle = `rgba(255, 255, 0, ${1 - i / 10})`;
+                ctx.fill();
+                ctx.closePath();
+            });
+            // Piłka
+            ctx.beginPath();
+            ctx.arc(
+                ball.x * canvas.width / 800,
+                ball.y * canvas.height / 400,
+                ball.radius * canvas.width / 800,
+                0,
+                Math.PI * 2
+            );
+            ctx.fillStyle = 'yellow';
+            ctx.fill();
+            ctx.closePath();
+            // Paletki z gradientem
+            Object.entries(players).forEach(([id, player]) => {
+                const gradient = ctx.createLinearGradient(
+                    player.x * canvas.width / 800,
+                    player.y * canvas.height / 400,
+                    (player.x + paddleWidth) * canvas.width / 800,
+                    (player.y + paddleHeight) * canvas.height / 400
+                );
+                gradient.addColorStop(0, id === '0' ? 'red' : 'blue');
+                gradient.addColorStop(1, id === '0' ? 'darkred' : 'darkblue');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(
+                    player.x * canvas.width / 800,
+                    player.y * canvas.height / 400,
+                    paddleWidth * canvas.width / 800,
+                    paddleHeight * canvas.height / 400
+                );
+            });
+        }
+        function update() {
+            if (isSpectator) {
                 updateStatus();
                 return;
             }
             let player = players[playerId];
             if (!player) return;
-
             const now = Date.now();
             if (now - lastUpdateTime < updateInterval) return;
             lastUpdateTime = now;
-
             // Sterowanie klawiaturą
             let direction = 0;
             if (playerId === '0') {
@@ -446,21 +709,20 @@
                 if (keys.ArrowUp) direction = -1;
                 if (keys.ArrowDown) direction = 1;
             }
-
             // Sterowanie dotykowe
             if (moveDirection !== 0) {
                 direction = moveDirection;
             }
-
             // Aktualizacja pozycji z wygładzaniem
             if (direction !== 0) {
                 const targetY = player.y + direction * paddleSpeed;
-                player.y += (targetY - player.y) * 0.5; // Wygładzanie
+                player.y += (targetY - player.y) * 0.7; // Zwiększono wygładzanie
                 player.y = Math.max(0, Math.min(400 - paddleHeight, player.y));
-                ws.send(JSON.stringify({ type: 'move', id: playerId, y: player.y }));
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'move', id: playerId, y: player.y }));
+                }
             }
         }
-
         function gameLoop() {
             update();
             draw();
