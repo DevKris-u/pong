@@ -154,6 +154,7 @@
 
             ws.onmessage = (e) => {
                 const d = JSON.parse(e.data);
+                // console.log('Odebrano wiadomość:', d); // Włącz do debugowania
                 if (d.type === 'init') {
                     playerId = d.id;
                     sessionId = d.sessionId;
@@ -288,7 +289,7 @@
             } else if (Object.values(players).some(p => p.disconnected)) {
                 status.textContent = 'Gracz rozłączony, oczekujemy na ponowne połączenie...';
             } else {
-                status.textContent = 'Gra rozpoczęta!';
+                status.textContent = 'Gracz dołączył! Gra rozpoczęta!';
             }
         }
 
@@ -302,7 +303,7 @@
                         ctx.fillRect(p.x * s, p.y * canvas.height / 400, paddleWidth * s, paddleHeight * canvas.height / 400);
                     }
                 });
-                return; // Nie rysuj piłki podczas pauzy
+                return;
             }
             ballTrail.forEach((p, i) => {
                 ctx.beginPath();
