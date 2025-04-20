@@ -134,7 +134,7 @@
         window.addEventListener('resize', resizeCanvas);
         resizeCanvas();
 
-        let ws, reconnectAttempts = 0, playerId, players = {}, ball = { x: 400, y: 200, dx: 5, dy: 5, r: 10 }, ballTrail = [],
+        let ws, reconnectAttempts = 0, playerId, sessionId = localStorage.getItem('sessionId') || null, players = {}, ball = { x: 400, y: 200, dx: 5, dy: 5, r: 10 }, ballTrail = [],
             paddleWidth = 10, paddleHeight = 60, paddleSpeed = 8, nickname = '', room = '', isSpectator = false, gameStartTime = null,
             moveDirection = 0, lastUpdateTime = 0, updateInterval = 33, keys = { w: false, s: false, ArrowUp: false, ArrowDown: false };
 
@@ -156,11 +156,14 @@
                 const d = JSON.parse(e.data);
                 if (d.type === 'init') {
                     playerId = d.id;
+                    sessionId = d.sessionId;
+                    localStorage.setItem('sessionId', sessionId);
                     players = d.players;
+                    ball = d.ball;
+                    score1.textContent = d.scores[0];
+                    score2.textContent = d.scores[1];
                     isSpectator = d.isSpectator;
                     gameStartTime = d.startTime || Date.now();
-                    score1.textContent = 0;
-                    score2.textContent = 0;
                     updateStatus();
                     touchControls.style.display = isSpectator ? 'none' : (window.innerWidth < 768 ? 'flex' : 'none');
                     spectatorControls.style.display = isSpectator ? 'block' : 'none';
@@ -171,6 +174,7 @@
                     score2.textContent = d.s[1];
                     ballTrail.push({ x: ball.x, y: ball.y });
                     if (ballTrail.length > 8) ballTrail.shift();
+                    updateStatus();
                 } else if (d.type === 'score') {
                     score1.textContent = d.s[0];
                     score2.textContent = d.s[1];
@@ -211,9 +215,9 @@
                 status.classList.remove('connected', 'reconnecting');
                 status.classList.add('disconnected');
                 status.textContent = 'Rozłączono...';
-                if (reconnectAttempts < 3) {
+                if (reconnectAttempts < 5) {
                     reconnectAttempts++;
-                    setTimeout(connectWebSocket, 2000 * Math.pow(1.5, reconnectAttempts)); // Wykładniczy backoff
+                    setTimeout(connectWebSocket, 2000 * Math.pow(1.5, reconnectAttempts));
                 } else {
                     status.textContent = 'Błąd połączenia. Odśwież stronę.';
                 }
@@ -246,7 +250,7 @@
             room = roomInput.value.trim() || 'default';
             isSpectator = spectatorCheckbox.checked;
             if (nickname || isSpectator) {
-                ws.send(JSON.stringify({ type: 'join', nickname: nickname || 'Widz', room, isSpectator }));
+                ws.send(JSON.stringify({ type: 'join', nickname: nickname || 'Widz', room, isSpectator, sessionId }));
                 joinSection.style.display = 'none';
                 gameSection.style.display = 'block';
             } else {
@@ -258,7 +262,7 @@
             const newRoom = roomSelect.value;
             if (newRoom && newRoom !== room) {
                 room = newRoom;
-                ws.send(JSON.stringify({ type: 'join', nickname: nickname || 'Widz', room, isSpectator: true }));
+                ws.send(JSON.stringify({ type: 'join', nickname: nickname || 'Widz', room, isSpectator: true, sessionId }));
             }
         }
 
@@ -279,19 +283,31 @@
             if (isSpectator) {
                 const c = Object.keys(players).length, e = Math.floor((Date.now() - gameStartTime) / 1000);
                 status.textContent = `Widz | Pokój: ${room} | Graczy: ${c}/2 | Czas: ${e}s`;
+            } else if (Object.keys(players).length < 2) {
+                status.textContent = 'Oczekiwanie na drugiego gracza...';
+            } else if (Object.values(players).some(p => p.disconnected)) {
+                status.textContent = 'Gracz rozłączony, oczekujemy na ponowne połączenie...';
             } else {
-                status.textContent = Object.keys(players).length < 2 ? 'Oczekiwanie na drugiego gracza...' : 'Gra rozpoczęta!';
+                status.textContent = 'Gra rozpoczęta!';
             }
         }
 
         function draw() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             const s = canvas.width / 800;
-            if (Object.keys(players).length < 2 && !isSpectator) return; // Nie rysuj piłki, jeśli brak graczy
+            if (Object.keys(players).length < 2 && !isSpectator || Object.values(players).some(p => p.disconnected)) {
+                Object.entries(players).forEach(([id, p]) => {
+                    if (!p.disconnected) {
+                        ctx.fillStyle = id === '0' ? 'red' : 'blue';
+                        ctx.fillRect(p.x * s, p.y * canvas.height / 400, paddleWidth * s, paddleHeight * canvas.height / 400);
+                    }
+                });
+                return; // Nie rysuj piłki podczas pauzy
+            }
             ballTrail.forEach((p, i) => {
                 ctx.beginPath();
                 ctx.arc(p.x * s, p.y * canvas.height / 400, ball.r * (1 - i / 8) * s, 0, Math.PI * 2);
-                ctx.fillStyle = `rgba(255, 255, 0, ${1 - i / 8})`;
+                ctx.fillStyle = `rgba(255, 255, 255, ${1 - i / 8})`;
                 ctx.fill();
                 ctx.closePath();
             });
@@ -301,8 +317,10 @@
             ctx.fill();
             ctx.closePath();
             Object.entries(players).forEach(([id, p]) => {
-                ctx.fillStyle = id === '0' ? 'red' : 'blue';
-                ctx.fillRect(p.x * s, p.y * canvas.height / 400, paddleWidth * s, paddleHeight * canvas.height / 400);
+                if (!p.disconnected) {
+                    ctx.fillStyle = id === '0' ? 'red' : 'blue';
+                    ctx.fillRect(p.x * s, p.y * canvas.height / 400, paddleWidth * s, paddleHeight * canvas.height / 400);
+                }
             });
         }
 
