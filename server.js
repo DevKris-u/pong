@@ -3,6 +3,7 @@ const express = require('express');
 const sanitizeHtml = require('sanitize-html');
 const path = require('path');
 const fs = require('fs');
+const { v4: uuidv4 } = require('uuid'); // Dodano uuid dla sesji
 
 let Low, JSONFile, db;
 try {
@@ -42,8 +43,10 @@ if (Low) {
 const server = app.listen(process.env.PORT || 3000);
 const wss = new WebSocket.Server({ server });
 const rooms = {};
-const UPDATE_INTERVAL = 1000 / 25; // 25 FPS
-const MAX_BALL_SPEED = 10; // Maksymalna prędkość piłki
+const sessions = {}; // Przechowywanie sesji graczy
+const UPDATE_INTERVAL = 1000 / 20; // 20 FPS
+const MAX_BALL_SPEED = 10;
+const KEEP_ALIVE_INTERVAL = 10000; // Ping co 10s
 
 function createRoom(room) {
     if (!rooms[room]) {
@@ -55,13 +58,23 @@ function createRoom(room) {
             activity: {},
             startTime: Date.now(),
             pendingUpdates: {},
-            lastHitTime: 0 // Czas ostatniego odbicia
+            lastHitTime: 0
         };
     }
 }
 
+// Keep-alive dla WebSocketów
+setInterval(() => {
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.ping();
+            client.lastPing = Date.now();
+        }
+    });
+}, KEEP_ALIVE_INTERVAL);
+
 wss.on('connection', (ws) => {
-    let clientId, roomName, nickname, isSpectator = false;
+    let clientId, roomName, nickname, isSpectator = false, sessionId = uuidv4();
 
     ws.on('message', (message) => {
         let data;
@@ -75,18 +88,24 @@ wss.on('connection', (ws) => {
             nickname = sanitizeHtml(data.nickname || 'Widz').slice(0, 20);
             roomName = sanitizeHtml(data.room || 'default').slice(0, 20);
             isSpectator = data.isSpectator || false;
+            sessionId = data.sessionId || sessionId; // Zachowaj sesję, jeśli podana
             createRoom(roomName);
 
             if (!isSpectator) {
-                const playerCount = Object.keys(rooms[roomName].players).length;
-                if (playerCount >= 2) {
+                let playerCount = Object.keys(rooms[roomName].players).length;
+                if (sessions[sessionId] && sessions[sessionId].room === roomName && rooms[roomName].players[sessions[sessionId].clientId]) {
+                    clientId = sessions[sessionId].clientId; // Przywróć istniejącego gracza
+                    rooms[roomName].players[clientId].nickname = nickname;
+                } else if (playerCount >= 2) {
                     ws.send(JSON.stringify({ type: 'error', message: 'Pokój pełny!' }));
                     ws.close();
                     return;
+                } else {
+                    clientId = playerCount.toString();
+                    rooms[roomName].players[clientId] = { x: clientId === '0' ? 10 : 780, y: 170, id: clientId, nickname };
+                    sessions[sessionId] = { room: roomName, clientId };
                 }
-                clientId = playerCount.toString();
-                rooms[roomName].players[clientId] = { x: clientId === '0' ? 10 : 780, y: 170, id: clientId, nickname };
-                resetBall(roomName); // Reset piłki przy nowym graczu
+                resetBall(roomName);
             } else {
                 clientId = `s_${Object.keys(rooms[roomName].spectators).length}`;
                 rooms[roomName].spectators[clientId] = { nickname };
@@ -95,8 +114,9 @@ wss.on('connection', (ws) => {
             ws.clientId = clientId;
             ws.isSpectator = isSpectator;
             ws.roomName = roomName;
+            ws.sessionId = sessionId;
             rooms[roomName].activity[clientId] = Date.now();
-            ws.send(JSON.stringify({ type: 'init', id: clientId, players: rooms[roomName].players, isSpectator, startTime: rooms[roomName].startTime }));
+            ws.send(JSON.stringify({ type: 'init', id: clientId, sessionId, players: rooms[roomName].players, ball: rooms[roomName].ball, scores: rooms[roomName].scores, isSpectator, startTime: rooms[roomName].startTime }));
             broadcast(roomName, { type: 'update', p: rooms[roomName].players, b: rooms[roomName].ball, s: rooms[roomName].scores });
             broadcastRooms();
         } else if (data.type === 'move' && clientId && !isSpectator && rooms[roomName]) {
@@ -115,24 +135,27 @@ wss.on('connection', (ws) => {
         }
     });
 
+    ws.on('pong', () => {
+        ws.lastPing = Date.now();
+    });
+
     ws.on('close', () => handleDisconnect(ws));
     ws.on('error', () => handleDisconnect(ws));
 });
 
 function handleDisconnect(ws) {
-    const { clientId, roomName, isSpectator } = ws;
+    const { clientId, roomName, isSpectator, sessionId } = ws;
     if (clientId && roomName && rooms[roomName]) {
-        if (isSpectator) delete rooms[roomName].spectators[clientId];
-        else {
-            delete rooms[roomName].players[clientId];
-            delete rooms[roomName].pendingUpdates[clientId];
-            resetBall(roomName);
-            rooms[roomName].scores = [0, 0]; // Reset wyników po rozłączeniu
+        if (isSpectator) {
+            delete rooms[roomName].spectators[clientId];
+        } else {
+            rooms[roomName].players[clientId].disconnected = true; // Oznacz jako rozłączony
+            rooms[roomName].activity[clientId] = Date.now();
         }
-        delete rooms[roomName].activity[clientId];
         broadcast(roomName, { type: 'update', p: rooms[roomName].players, b: rooms[roomName].ball, s: rooms[roomName].scores });
         if (!Object.keys(rooms[roomName].players).length && !Object.keys(rooms[roomName].spectators).length) {
             delete rooms[roomName];
+            delete sessions[sessionId];
         }
         broadcastRooms();
     }
@@ -142,20 +165,27 @@ setInterval(() => {
     const now = Date.now();
     Object.keys(rooms).forEach(room => {
         Object.keys(rooms[room].activity).forEach(id => {
-            if (now - rooms[room].activity[id] > 10000) {
+            if (now - rooms[room].activity[id] > 30000) { // 30s na ponowne połączenie
                 if (rooms[room].players[id]) {
                     delete rooms[room].players[id];
                     delete rooms[room].pendingUpdates[id];
+                    resetBall(room);
+                    rooms[room].scores = [0, 0];
                 } else if (rooms[room].spectators[id]) {
                     delete rooms[room].spectators[id];
                 }
                 delete rooms[room].activity[id];
-                resetBall(room);
                 broadcast(room, { type: 'update', p: rooms[room].players, b: rooms[room].ball, s: rooms[room].scores });
             }
         });
         if (!Object.keys(rooms[room].players).length && !Object.keys(rooms[room].spectators).length) {
             delete rooms[room];
+        }
+    });
+    // Sprawdzanie keep-alive
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN && client.lastPing && now - client.lastPing > 15000) {
+            client.terminate();
         }
     });
     broadcastRooms();
@@ -164,7 +194,7 @@ setInterval(() => {
 setInterval(() => {
     Object.keys(rooms).forEach(room => {
         const { ball, players, scores, pendingUpdates, lastHitTime } = rooms[room];
-        if (Object.keys(players).length < 2) return; // Pauza, jeśli brak graczy
+        if (Object.keys(players).length < 2 || Object.values(players).some(p => p.disconnected)) return; // Pauza gry
 
         Object.keys(pendingUpdates).forEach(id => players[id].y = pendingUpdates[id]);
         rooms[room].pendingUpdates = {};
@@ -175,11 +205,11 @@ setInterval(() => {
 
         const now = Date.now();
         let hit = false;
-        if (now - lastHitTime > 100) { // Minimalny czas między odbiciami
+        if (now - lastHitTime > 100) {
             Object.values(players).forEach(p => {
-                if (ball.x - ball.r < p.x + 10 && ball.x + ball.r > p.x && ball.y > p.y && ball.y < p.y + 60) {
+                if (!p.disconnected && ball.x - ball.r < p.x + 10 && ball.x + ball.r > p.x && ball.y > p.y && ball.y < p.y + 60) {
                     ball.dx = -ball.dx * 1.05;
-                    ball.dx = Math.max(-MAX_BALL_SPEED, Math.min(MAX_BALL_SPEED, ball.dx)); // Ograniczenie prędkości
+                    ball.dx = Math.max(-MAX_BALL_SPEED, Math.min(MAX_BALL_SPEED, ball.dx));
                     ball.dy = Math.max(-MAX_BALL_SPEED, Math.min(MAX_BALL_SPEED, ball.dy));
                     hit = true;
                     rooms[room].lastHitTime = now;
@@ -254,7 +284,7 @@ function broadcastScore(room) {
 function updateLeaderboard(room, winnerId) {
     if (!rooms[room]) return;
     const winner = rooms[room].players[winnerId];
-    if (winner) {
+    if (winner && !winner.disconnected) {
         const existing = db.data.scores.find(s => s.nickname === winner.nickname);
         if (existing) existing.score++;
         else db.data.scores.push({ nickname: winner.nickname, score: 1 });
