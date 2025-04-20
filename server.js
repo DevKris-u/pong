@@ -64,6 +64,7 @@ const server = app.listen(process.env.PORT || 3000, () => {
 const wss = new WebSocket.Server({ server });
 
 const rooms = {};
+const UPDATE_INTERVAL = 1000 / 30; // Aktualizacja gry co 33ms (30 FPS)
 
 function createRoom(room) {
     if (!rooms[room]) {
@@ -73,7 +74,8 @@ function createRoom(room) {
             ball: { x: 400, y: 200, dx: 5, dy: 5, radius: 10 },
             scores: [0, 0],
             activity: {},
-            startTime: Date.now()
+            startTime: Date.now(),
+            pendingUpdates: {} // Bufor zmian pozycji graczy
         };
     }
 }
@@ -115,12 +117,13 @@ wss.on('connection', (ws) => {
 
             ws.clientId = clientId;
             ws.isSpectator = isSpectator;
+            ws.roomName = roomName;
             rooms[roomName].activity[clientId] = Date.now();
             ws.send(JSON.stringify({ type: 'init', id: clientId, players: rooms[roomName].players, isSpectator, startTime: rooms[roomName].startTime }));
             broadcast(roomName, { type: 'update', players: rooms[roomName].players, ball: rooms[roomName].ball });
             broadcastRooms();
         } else if (data.type === 'move' && clientId && !isSpectator && rooms[roomName]) {
-            rooms[roomName].players[clientId].y = Math.max(0, Math.min(400 - 60, data.y));
+            rooms[roomName].pendingUpdates[clientId] = Math.max(0, Math.min(400 - 60, data.y));
             rooms[roomName].activity[clientId] = Date.now();
         } else if (data.type === 'chat' && clientId && rooms[roomName]) {
             const cleanMessage = sanitizeHtml(data.message).slice(0, 100);
@@ -140,49 +143,70 @@ wss.on('connection', (ws) => {
     });
 
     ws.on('close', () => {
-        if (clientId && roomName && rooms[roomName]) {
-            if (isSpectator) {
-                delete rooms[roomName].spectators[clientId];
-            } else {
-                delete rooms[roomName].players[clientId];
-            }
-            delete rooms[roomName].activity[clientId];
-            resetBall(roomName);
-            broadcast(roomName, { type: 'update', players: rooms[roomName].players, ball: rooms[roomName].ball });
-            if (Object.keys(rooms[roomName].players).length === 0 && Object.keys(rooms[roomName].spectators).length === 0) {
-                delete rooms[roomName];
-            }
-            broadcastRooms();
-        }
+        handleDisconnect(ws);
+    });
+
+    ws.on('error', (err) => {
+        console.error(`Błąd WebSocket dla klienta ${clientId}:`, err);
+        handleDisconnect(ws);
     });
 });
+
+function handleDisconnect(ws) {
+    const { clientId, roomName, isSpectator } = ws;
+    if (clientId && roomName && rooms[roomName]) {
+        if (isSpectator) {
+            delete rooms[roomName].spectators[clientId];
+        } else {
+            delete rooms[roomName].players[clientId];
+            delete rooms[roomName].pendingUpdates[clientId];
+        }
+        delete rooms[roomName].activity[clientId];
+        resetBall(roomName);
+        broadcast(roomName, { type: 'update', players: rooms[roomName].players, ball: rooms[roomName].ball });
+        if (Object.keys(rooms[roomName].players).length === 0 && Object.keys(rooms[roomName].spectators).length === 0) {
+            delete rooms[roomName];
+        }
+        broadcastRooms();
+    }
+}
 
 // Sprawdzanie nieaktywnych klientów
 setInterval(() => {
     const now = Date.now();
     Object.keys(rooms).forEach(room => {
         Object.keys(rooms[room].activity).forEach(id => {
-            if (now - rooms[room].activity[id] > 30000) {
+            if (now - rooms[room].activity[id] > 15000) { // Skrócono do 15s
                 if (rooms[room].players[id]) {
                     delete rooms[room].players[id];
+                    delete rooms[room].pendingUpdates[id];
                 } else if (rooms[room].spectators[id]) {
                     delete rooms[room].spectators[id];
                 }
                 delete rooms[room].activity[id];
+                resetBall(room);
                 broadcast(room, { type: 'update', players: rooms[room].players, ball: rooms[room].ball });
             }
         });
         if (Object.keys(rooms[room].players).length === 0 && Object.keys(rooms[room].spectators).length === 0) {
             delete rooms[room];
         }
-        broadcastRooms();
     });
+    broadcastRooms();
 }, 1000);
 
 // Logika gry
 setInterval(() => {
     Object.keys(rooms).forEach(room => {
-        const { ball, players, scores } = rooms[room];
+        const { ball, players, scores, pendingUpdates } = rooms[room];
+
+        // Aktualizacja pozycji graczy z bufora
+        Object.keys(pendingUpdates).forEach(id => {
+            players[id].y = pendingUpdates[id];
+        });
+        rooms[room].pendingUpdates = {};
+
+        // Aktualizacja piłki
         ball.x += ball.dx;
         ball.y += ball.dy;
 
@@ -198,7 +222,7 @@ setInterval(() => {
                 ball.y > player.y &&
                 ball.y < player.y + 60
             ) {
-                ball.dx = -ball.dx;
+                ball.dx = -ball.dx * 1.05; // Lekkie przyspieszenie po odbiciu
                 hit = true;
             }
         });
@@ -215,9 +239,15 @@ setInterval(() => {
             broadcastScore(room);
         }
 
-        broadcast(room, { type: 'update', players, ball, hit });
+        // Wysyłanie skompresowanego stanu gry
+        broadcast(room, {
+            type: 'update',
+            players: Object.fromEntries(Object.entries(players).map(([id, p]) => [id, { x: p.x, y: p.y, id: p.id }])),
+            ball: { x: ball.x, y: ball.y, dx: ball.dx, dy: ball.dy, radius: ball.radius },
+            hit
+        });
     });
-}, 1000 / 60);
+}, UPDATE_INTERVAL);
 
 function resetBall(room) {
     if (rooms[room]) {
@@ -232,7 +262,11 @@ function broadcast(room, message) {
     if (!rooms[room]) return;
     wss.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN && (rooms[room].players[client.clientId] || rooms[room].spectators[client.clientId])) {
-            client.send(JSON.stringify(message));
+            try {
+                client.send(JSON.stringify(message));
+            } catch (e) {
+                console.error(`Błąd wysyłania do klienta ${client.clientId}:`, e);
+            }
         }
     });
 }
@@ -241,7 +275,11 @@ function broadcastSpectators(room, message) {
     if (!rooms[room]) return;
     wss.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN && rooms[room].spectators[client.clientId]) {
-            client.send(JSON.stringify(message));
+            try {
+                client.send(JSON.stringify(message));
+            } catch (e) {
+                console.error(`Błąd wysyłania do widza ${client.clientId}:`, e);
+            }
         }
     });
 }
@@ -254,7 +292,11 @@ function broadcastRooms() {
     }));
     wss.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({ type: 'rooms', rooms: roomData }));
+            try {
+                client.send(JSON.stringify({ type: 'rooms', rooms: roomData }));
+            } catch (e) {
+                console.error(`Błąd wysyłania listy pokoi do klienta ${client.clientId}:`, e);
+            }
         }
     });
 }
