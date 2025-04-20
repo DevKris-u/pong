@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pong Multiplayer</title>
+    <style>
+        body {
+            background: #333;
+            text-align: center;
+            color: white;
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            touch-action: none;
+        }
+        h1 {
+            font-size: 24px;
+            margin: 10px 0;
+        }
+        canvas {
+            border: 2px solid white;
+            background: black;
+            max-width: 100%;
+            max-height: 50vh;
+            flex-grow: 1;
+        }
+        p {
+            font-size: 14px;
+            margin: 5px 0;
+        }
+        .touch-controls {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: none;
+            flex-direction: column;
+            pointer-events: auto;
+        }
+        .touch-zone {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.1);
+            transition: background 0.2s;
+        }
+        .touch-region.active {
+            background: rgba(255, 255, 255, 0.3);
+        }
+        .chat {
+            margin: 10px;
+            flex-shrink: 0;
+        }
+        .chat input {
+            padding: 5px;
+            width: 60%;
+            max-width: 300px;
+        }
+        .chat button {
+            padding: 5px 10px;
+        }
+        .chat-box {
+            background: #444;
+            height: 80px;
+            overflow-y: auto;
+            margin: 5px auto;
+            width: 80%;
+            max-width: 400px;
+            padding: 5px;
+            font-size: 12px;
+        }
+        .scores {
+            font-size: 16px;
+            margin: 5px;
+        }
+        .leaderboard {
+            font-size: 14px;
+            margin: 5px;
+        }
+        .status {
+            font-size: 16px;
+            color: yellow;
+            margin: 5px;
+        }
+        .join {
+            margin: 10px;
+        }
+        .join input, .join select {
+            padding: 5px;
+            width: 200px;
+            margin: 5px;
+        }
+        .join button {
+            padding: 5px 10px;
+        }
+        .rooms {
+            max-height: 100px;
+            overflow-y: auto;
+        }
+        .spectator-controls {
+            margin: 10px;
+            display: none;
+        }
+        .spectator-controls select {
+            padding: 5px;
+            width: 200px;
+        }
+        .spectator-controls button {
+            padding: 5px 10px;
+        }
+        @media (max-width: 767px) {
+            canvas {
+                max-height: 40vh;
+            }
+            .touch-controls {
+                display: flex;
+            }
+            .chat-box {
+                height: 60px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <h1>Pong Multiplayer</h1>
+    <div class="join" id="joinSection">
+        <input type="text" id="nickname" placeholder="Wpisz pseudonim" maxlength="20">
+        <input type="text" id="room" placeholder="Nazwa pokoju" maxlength="20">
+        <label><input type="checkbox" id="spectator"> Tryb widza</label>
+        <div class="rooms">
+            <strong>Dostępne pokoje:</strong>
+            <div id="roomList"></div>
+        </div>
+        <button onclick="joinGame()">Dołącz</button>
+    </div>
+    <div id="gameSection" style="display: none;">
+        <div class="status" id="status">Oczekiwanie na drugiego gracza...</div>
+        <div class="scores">Gracz 1: <span id="score1">0</span> | Gracz 2: <span id="score2">0</span></div>
+        <canvas id="gameCanvas"></canvas>
+        <p>Na komputerze: Gracz 1 (W/S), Gracz 2 (strzałki). Na telefonie: dotknij górnej/dolnej połowy ekranu.</p>
+        <div class="chat">
+            <div class="chat-box" id="chatBox"></div>
+            <input type="text" id="chatInput" placeholder="Wpisz wiadomość..." maxlength="100">
+            <button onclick="sendChat()">Wyślij</button>
+        </div>
+        <div class="leaderboard">
+            <strong>Tabela liderów:</strong>
+            <div id="leaderboard"></div>
+        </div>
+        <div class="spectator-controls" id="spectatorControls">
+            <select id="roomSelect"></select>
+            <button onclick="switchRoom()">Zmień pokój</button>
+        </div>
+        <div class="touch-controls" id="touchControls">
+            <div class="touch-zone" id="upZone"></div>
+            <div class="touch-zone" id="downZone"></div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const chatBox = document.getElementById('chatBox');
+        const chatInput = document.getElementById('chatInput');
+        const score1 = document.getElementById('score1');
+        const score2 = document.getElementById('score2');
+        const leaderboard = document.getElementById('leaderboard');
+        const status = document.getElementById('status');
+        const joinSection = document.getElementById('joinSection');
+        const gameSection = document.getElementById('gameSection');
+        const nicknameInput = document.getElementById('nickname');
+        const roomInput = document.getElementById('room');
+        const spectatorCheckbox = document.getElementById('spectator');
+        const roomList = document.getElementById('roomList');
+        const spectatorControls = document.getElementById('spectatorControls');
+        const roomSelect = document.getElementById('roomSelect');
+        const touchControls = document.getElementById('touchControls');
+        const upZone = document.getElementById('upZone');
+        const downZone = document.getElementById('downZone');
+
+        // Responsywne wymiary canvas
+        function resizeCanvas() {
+            const aspectRatio = 800 / 400;
+            let width = window.innerWidth * 0.9;
+            let height = width / aspectRatio;
+            if (height > window.innerHeight * (window.innerWidth < 768 ? 0.4 : 0.5)) {
+                height = window.innerHeight * (window.innerWidth < 768 ? 0.4 : 0.5);
+                width = height * aspectRatio;
+            }
+            canvas.width = width;
+            canvas.height = height;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // Połączenie WebSocket
+        const ws = new WebSocket(window.location.protocol === 'https:' ? 'wss://' + window.location.host : 'ws://' + window.location.host);
+        let playerId;
+        let players = {};
+        let ball = { x: 400, y: 200, dx: 5, dy: 5, radius: 10 };
+        let ballTrail = [];
+        const paddleWidth = 10, paddleHeight = 60, paddleSpeed = 6;
+        let nickname = '';
+        let room = '';
+        let isSpectator = false;
+        let gameStartTime = null;
+
+        // Sterowanie
+        let moveDirection = 0; // -1 (góra), 0 (stop), 1 (dół)
+        let lastUpdateTime = 0;
+        const updateInterval = 100; // Aktualizacja co 100ms
+
+        // Sterowanie klawiaturą
+        let keys = { w: false, s: false, ArrowUp: false, ArrowDown: false };
+        document.addEventListener('keydown', e => {
+            if (e.key in keys) keys[e.key] = true;
+        });
+        document.addEventListener('keyup', e => {
+            if (e.key in keys) keys[e.key] = false;
+        });
+
+        // Sterowanie dotykowe
+        function handleTouch(e) {
+            e.preventDefault();
+            const touch = e.touches[0];
+            const halfHeight = window.innerHeight / 2;
+            if (touch.clientY < halfHeight) {
+                moveDirection = -1;
+                upZone.classList.add('active');
+                downZone.classList.remove('active');
+            } else {
+                moveDirection = 1;
+                downZone.classList.add('active');
+                upZone.classList.remove('active');
+            }
+        }
+        document.addEventListener('touchstart', handleTouch);
+        document.addEventListener('touchmove', handleTouch);
+        document.addEventListener('touchend', () => {
+            moveDirection = 0;
+            upZone.classList.remove('active');
+            downZone.classList.remove('active');
+        });
+
+        // Dołączanie do gry
+        function joinGame() {
+            nickname = nicknameInput.value.trim();
+            room = roomInput.value.trim() || 'default';
+            isSpectator = spectatorCheckbox.checked;
+            if (nickname || isSpectator) {
+                ws.send(JSON.stringify({ type: 'join', nickname: nickname || 'Widz', room, isSpectator }));
+                joinSection.style.display = 'none';
+                gameSection.style.display = 'block';
+            } else {
+                alert('Wpisz pseudonim lub wybierz tryb widza!');
+            }
+        }
+
+        // Zmiana pokoju w trybie widza
+        function switchRoom() {
+            const newRoom = roomSelect.value;
+            if (newRoom && newRoom !== room) {
+                room = newRoom;
+                ws.send(JSON.stringify({ type: 'join', nickname: nickname || 'Widz', room, isSpectator: true }));
+            }
+        }
+
+        // Lista pokoi
+        function updateRoomList(rooms) {
+            roomList.innerHTML = '';
+            roomSelect.innerHTML = '';
+            if (rooms.length === 0) {
+                roomList.textContent = 'Brak aktywnych pokoi';
+                return;
+            }
+            rooms.forEach(r => {
+                const div = document.createElement('div');
+                div.textContent = `${r.room} (${r.players} graczy, ${r.spectators} widzów)`;
+                div.style.cursor = 'pointer';
+                div.onclick = () => {
+                    roomInput.value = r.room;
+                };
+                roomList.appendChild(div);
+
+                const option = document.createElement('option');
+                option.value = r.room;
+                option.textContent = `${r.room} (${r.players}/2 graczy)`;
+                roomSelect.appendChild(option);
+            });
+        }
+
+        // Czat
+        let lastChatTime = 0;
+        function sendChat() {
+            const now = Date.now();
+            if (now - lastChatTime < 2000) return;
+            const message = chatInput.value.trim();
+            if (message) {
+                ws.send(JSON.stringify({ type: isSpectator ? 'spectatorChat' : 'chat', message }));
+                chatInput.value = '';
+                lastChatTime = now;
+            }
+        }
+        chatInput.addEventListener('keypress', e => {
+            if (e.key === 'Enter') sendChat();
+        });
+
+        ws.onopen = () => {
+            console.log('Połączono z serwerem');
+            ws.send(JSON.stringify({ type: 'getRooms' }));
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'init') {
+                playerId = data.id;
+                players = data.players;
+                isSpectator = data.isSpectator;
+                gameStartTime = data.startTime || Date.now();
+                updateStatus();
+                touchControls.style.display = isSpectator ? 'none' : (window.innerWidth < 768 ? 'flex' : 'none');
+                spectatorControls.style.display = isSpectator ? 'block' : 'none';
+            } else if (data.type === 'update') {
+                players = data.players;
+                ball = data.ball;
+                ballTrail.push({ x: ball.x, y: ball.y });
+                if (ballTrail.length > 10) ballTrail.shift();
+            } else if (data.type === 'score') {
+                score1.textContent = data.scores[0];
+                score2.textContent = data.scores[1];
+                updateLeaderboard(data.leaderboard);
+            } else if (data.type === 'chat') {
+                const msg = document.createElement('div');
+                msg.textContent = `${data.nickname}: ${data.message}`;
+                chatBox.appendChild(msg);
+                chatBox.scrollTop = chatBox.scrollHeight;
+            } else if (data.type === 'spectatorChat') {
+                if (isSpectator) {
+                    const msg = document.createElement('div');
+                    msg.textContent = `[Widz] ${data.nickname}: ${data.message}`;
+                    msg.style.color = '#aaa';
+                    chatBox.appendChild(msg);
+                    chatBox.scrollTop = chatBox.scrollHeight;
+                }
+            } else if (data.type === 'rooms') {
+                updateRoomList(data.rooms);
+            } else if (data.type === 'error') {
+                alert(data.message);
+                joinSection.style.display = 'block';
+                gameSection.style.display = 'none';
+            }
+        };
+
+        function updateStatus() {
+            if (isSpectator) {
+                const playerCount = Object.keys(players).length;
+                const elapsed = Math.floor((Date.now() - gameStartTime) / 1000);
+                status.textContent = `Tryb widza | Pokój: ${room} | Graczy: ${playerCount}/2 | Czas gry: ${elapsed}s`;
+            } else {
+                status.textContent = Object.keys(players).length < 2 ? 'Oczekiwanie na drugiego gracza...' : 'Gra rozpoczęta!';
+            }
+        }
+
+        function updateLeaderboard(leaders) {
+            leaderboard.innerHTML = '';
+            leaders.forEach(leader => {
+                const div = document.createElement('div');
+                div.textContent = `${leader.nickname}: ${leader.score}`;
+                leaderboard.appendChild(div);
+            });
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Ślad piłki
+            ballTrail.forEach((pos, i) => {
+                ctx.beginPath();
+                ctx.arc(
+                    pos.x * canvas.width / 800,
+                    pos.y * canvas.height / 400,
+                    ball.radius * (1 - i / 10) * canvas.width / 800,
+                    0,
+                    Math.PI * 2
+                );
+                ctx.fillStyle = `rgba(255, 255, 0, ${1 - i / 10})`;
+                ctx.fill();
+                ctx.closePath();
+            });
+
+            // Piłka
+            ctx.beginPath();
+            ctx.arc(
+                ball.x * canvas.width / 800,
+                ball.y * canvas.height / 400,
+                ball.radius * canvas.width / 800,
+                0,
+                Math.PI * 2
+            );
+            ctx.fillStyle = 'yellow';
+            ctx.fill();
+            ctx.closePath();
+
+            // Paletki z gradientem
+            Object.entries(players).forEach(([id, player]) => {
+                const gradient = ctx.createLinearGradient(
+                    player.x * canvas.width / 800,
+                    player.y * canvas.height / 400,
+                    (player.x + paddleWidth) * canvas.width / 800,
+                    (player.y + paddleHeight) * canvas.height / 400
+                );
+                gradient.addColorStop(0, id === '0' ? 'red' : 'blue');
+                gradient.addColorStop(1, id === '0' ? 'darkred' : 'darkblue');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(
+                    player.x * canvas.width / 800,
+                    player.y * canvas.height / 400,
+                    paddleWidth * canvas.width / 800,
+                    paddleHeight * canvas.height / 400
+                );
+            });
+        }
+
+        function update() {
+            if (isSpectator) {
+                updateStatus();
+                return;
+            }
+            let player = players[playerId];
+            if (!player) return;
+
+            const now = Date.now();
+            if (now - lastUpdateTime < updateInterval) return;
+            lastUpdateTime = now;
+
+            // Sterowanie klawiaturą
+            let direction = 0;
+            if (playerId === '0') {
+                if (keys.w) direction = -1;
+                if (keys.s) direction = 1;
+            } else {
+                if (keys.ArrowUp) direction = -1;
+                if (keys.ArrowDown) direction = 1;
+            }
+
+            // Sterowanie dotykowe
+            if (moveDirection !== 0) {
+                direction = moveDirection;
+            }
+
+            // Aktualizacja pozycji z wygładzaniem
+            if (direction !== 0) {
+                const targetY = player.y + direction * paddleSpeed;
+                player.y += (targetY - player.y) * 0.5; // Wygładzanie
+                player.y = Math.max(0, Math.min(400 - paddleHeight, player.y));
+                ws.send(JSON.stringify({ type: 'move', id: playerId, y: player.y }));
+            }
+        }
+
+        function gameLoop() {
+            update();
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+        gameLoop();
+    </script>
+</body>
+</html>
